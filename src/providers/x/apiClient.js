@@ -379,10 +379,11 @@ const createXApiClient = ({ sessionPath }) => {
     const userResult = tweet?.core?.user_results?.result;
     const username = userResult?.core?.screen_name || userResult?.legacy?.screen_name;
     const name = userResult?.core?.name || userResult?.legacy?.name;
+    const text = tweet?.note_tweet?.note_tweet_results?.result?.text || legacy.full_text;
 
     return {
       id: legacy.id_str || tweet.rest_id,
-      text: legacy.full_text,
+      text,
       username,
       name,
       likeCount: legacy.favorite_count,
@@ -399,21 +400,46 @@ const createXApiClient = ({ sessionPath }) => {
   };
 
   const getUserTweets = async (userId, count = 20) => {
-    const data = await graphqlQuery('UserTweets', {
-      userId,
-      count,
-      includePromotedContent: false,
-      withQuickPromoteEligibilityTweetFields: false,
-      withVoice: false,
-      withV2Timeline: true,
-    });
-    const timeline = data?.data?.user?.result?.timeline_v2?.timeline
-      || data?.data?.user?.result?.timeline?.timeline;
-    const instructions = timeline?.instructions || [];
+    const targetCount = Math.max(1, Math.trunc(Number(count) || 20));
+    const pageSize = Math.min(targetCount, 20);
+    const posts = [];
+    const seenPostIds = new Set();
+    const seenCursors = new Set();
+    let cursor;
 
-    return collectEntries(instructions)
-      .map(parseTweet)
-      .filter(Boolean);
+    while (posts.length < targetCount) {
+      const data = await graphqlQuery('UserTweets', {
+        userId,
+        count: pageSize,
+        includePromotedContent: false,
+        withQuickPromoteEligibilityTweetFields: false,
+        withVoice: false,
+        withV2Timeline: true,
+        ...(cursor ? { cursor } : {}),
+      });
+      const timeline = data?.data?.user?.result?.timeline_v2?.timeline
+        || data?.data?.user?.result?.timeline?.timeline;
+      const entries = collectEntries(timeline?.instructions || []);
+
+      for (const entry of entries) {
+        const post = parseTweet(entry);
+        if (post && !seenPostIds.has(post.id)) {
+          seenPostIds.add(post.id);
+          posts.push(post);
+        }
+      }
+
+      const nextCursor = entries.find((entry) =>
+        entry.content?.cursorType === 'Bottom'
+        || entry.entryId?.startsWith('cursor-bottom-'))
+        ?.content?.value;
+
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+
+    return posts.slice(0, targetCount);
   };
 
   const getTweetDetail = async (tweetId) => {
